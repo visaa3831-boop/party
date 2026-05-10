@@ -1,21 +1,12 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
 	"log"
-	"net/http"
 	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
-
-	"partydiscord/internal/backup"
 )
 
 func main() {
@@ -38,18 +29,26 @@ func main() {
 		log.Fatalf("discord session: %v", err)
 	}
 
-	// FIX: proper intents
 	dg.Identify.Intents =
 		discordgo.IntentsGuilds |
 			discordgo.IntentsGuildMessages |
 			discordgo.IntentsMessageContent |
 			discordgo.IntentsGuildVoiceStates
 
-	store := newGiveawayStore()
-	_ = store.load()
+	store := newGiveawayStore(vcRoleID)
+	if err := store.load(); err != nil {
+		log.Printf("giveaway store load: %v", err)
+	}
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		log.Printf("logged in as %s", r.User.String())
+		if guildID != "" {
+			if err := registerCommands(s, guildID); err != nil {
+				log.Printf("register commands: %v", err)
+			}
+		} else {
+			log.Println("DISCORD_GUILD_ID unset: slash commands not registered (set it for guild commands)")
+		}
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -67,16 +66,10 @@ func main() {
 		handleGiveawayCommand(s, i, store)
 	})
 
-	// FIX: required to actually connect
 	if err := dg.Open(); err != nil {
 		log.Fatalf("open discord session: %v", err)
 	}
 	defer dg.Close()
-
-	// register slash commands if guild provided
-	if guildID != "" {
-		_ = registerCommands(dg, guildID)
-	}
 
 	go runEndWatcher(dg, store)
 
@@ -85,9 +78,39 @@ func main() {
 	select {}
 }
 
-/* =========================
-   FIX: SAFE OPTION HELPERS
-   ========================= */
+// --- option helpers (slash) ---
+
+func subcommandOptions(data *discordgo.ApplicationCommandInteractionData) []*discordgo.ApplicationCommandInteractionDataOption {
+	if data == nil || len(data.Options) == 0 {
+		return nil
+	}
+	return data.Options[0].Options
+}
+
+func optionString(opts []*discordgo.ApplicationCommandInteractionDataOption, name string) string {
+	for _, o := range opts {
+		if o.Name == name {
+			if v, ok := o.Value.(string); ok {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+func optionInt(opts []*discordgo.ApplicationCommandInteractionDataOption, name string) int {
+	for _, o := range opts {
+		if o.Name == name {
+			switch v := o.Value.(type) {
+			case float64:
+				return int(v)
+			case int:
+				return v
+			}
+		}
+	}
+	return 0
+}
 
 func optionRoleID(opts []*discordgo.ApplicationCommandInteractionDataOption, name string) string {
 	for _, o := range opts {
@@ -100,19 +123,9 @@ func optionRoleID(opts []*discordgo.ApplicationCommandInteractionDataOption, nam
 	return ""
 }
 
-func optionUserID(opts []*discordgo.ApplicationCommandInteractionDataOption, name string) string {
-	for _, o := range opts {
-		if o.Name == name {
-			if v, ok := o.Value.(string); ok {
-				return v
-			}
-		}
+func optionChannelID(opts []*discordgo.ApplicationCommandInteractionDataOption, name string) string {
+	if name == "" {
+		name = "channel"
 	}
-	return ""
+	return optionString(opts, name)
 }
-
-/* =========================
-   EVERYTHING ELSE UNCHANGED
-   ========================= */
-
-// (rest of your file stays EXACTLY the same below this line)

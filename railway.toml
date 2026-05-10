@@ -1,0 +1,8 @@
+# Giveaway bot — Railpack would otherwise build cmd/backupbot first alphabetically.
+
+[build]
+builder = "RAILPACK"
+buildCommand = "go build -trimpath -ldflags='-s -w' -o out ./cmd/giveawaybot"
+
+[deploy]
+startCommand = "./out"

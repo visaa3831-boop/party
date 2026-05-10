@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -32,7 +33,8 @@ type oauthUser struct {
 func NewHandler(cfg *config.Config) http.Handler {
 	store := sessions.NewCookieStore([]byte(cfg.SessionSecret))
 	store.Options.HttpOnly = true
-	store.Options.Secure = false // set true behind HTTPS + SameSite
+	// Railway (and similar) terminates TLS in front of the app; cookies must be Secure there.
+	store.Options.Secure = strings.TrimSpace(os.Getenv("RAILWAY_ENVIRONMENT")) != ""
 	store.Options.SameSite = http.SameSiteLaxMode
 	store.Options.MaxAge = 86400 * 7
 
