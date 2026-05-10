@@ -1,11 +1,3 @@
-// Command backupbot exports a Discord guild snapshot (roles, channels with permission overwrites,
-// sidebar order, optional messages) and downloads the server icon to disk. No web UI required.
-//
-// Environment:
-//   DISCORD_BOT_TOKEN — bot token (same app as your Discord application).
-//   DISCORD_GUILD_ID  — server (guild) snowflake ID.
-//   BACKUP_OUT_DIR    — optional output directory (default: ./backups/<guildId>-<timestamp>).
-//   BACKUP_SKIP_MEMBERS / BACKUP_SKIP_MESSAGES — same as the web server (see .env.example).
 package main
 
 import (
@@ -32,6 +24,7 @@ func main() {
 	if guildID == "" {
 		guildID = strings.TrimSpace(os.Getenv("GUILD_ID"))
 	}
+
 	if token == "" || guildID == "" {
 		log.Fatal("set DISCORD_BOT_TOKEN and DISCORD_GUILD_ID (or GUILD_ID)")
 	}
@@ -41,6 +34,7 @@ func main() {
 		stamp := time.Now().UTC().Format("20060102T150405")
 		outDir = filepath.Join("backups", fmt.Sprintf("%s-%s", guildID, stamp))
 	}
+
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		log.Fatalf("mkdir: %v", err)
 	}
@@ -56,6 +50,16 @@ func main() {
 		log.Fatalf("discord session: %v", err)
 	}
 
+	// 🔥 THIS IS THE MISSING PIECE (connect to Discord)
+	err = dg.Open()
+	if err != nil {
+		log.Fatalf("failed to open Discord connection: %v", err)
+	}
+	defer dg.Close()
+
+	log.Println("Bot connected to Discord")
+
+	// Build backup AFTER connection is established
 	payload, err := backup.Build(dg, guildID, opts)
 	if err != nil {
 		log.Fatalf("backup: %v", err)
@@ -65,6 +69,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("json: %v", err)
 	}
+
 	jsonPath := filepath.Join(outDir, "guild-backup.json")
 	if err := os.WriteFile(jsonPath, data, 0o644); err != nil {
 		log.Fatalf("write json: %v", err)
@@ -78,4 +83,7 @@ func main() {
 	}
 
 	log.Printf("wrote %s (%d bytes)", jsonPath, len(data))
+
+	// 🔥 KEEP CONTAINER ALIVE ON RAILWAY
+	select {}
 }
