@@ -1,8 +1,9 @@
 # Giveaway bot — Railpack would otherwise build cmd/backupbot first alphabetically.
+# Use Go 1.23.x in go.mod so Railpack can install a matching toolchain (1.25 is often unavailable).
 
 [build]
 builder = "RAILPACK"
-buildCommand = "go build -trimpath -ldflags='-s -w' -o out ./cmd/giveawaybot"
+buildCommand = "CGO_ENABLED=0 go build -trimpath -ldflags=\"-s -w\" -o out ./cmd/giveawaybot"
 
 [deploy]
 startCommand = "./out"
