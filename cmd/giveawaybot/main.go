@@ -63,7 +63,7 @@ func main() {
 		if i.Type != discordgo.InteractionApplicationCommand {
 			return
 		}
-		handleGiveawayCommand(s, i, store)
+		handleGiveawaySlash(s, i, store)
 	})
 
 	if err := dg.Open(); err != nil {

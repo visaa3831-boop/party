@@ -8,18 +8,27 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/bwmarrin/discordgo"
 )
 
 const joinPrefix = "gw:join:"
 
-func prefix() string {
-	p := strings.TrimSpace(os.Getenv("GIVEAWAY_PREFIX"))
-	if p == "" {
-		return "!gw"
+func messagePrefixes() []string {
+	if p := strings.TrimSpace(os.Getenv("GIVEAWAY_PREFIX")); p != "" {
+		return []string{p}
 	}
-	return p
+	return []string{"$g", "!gw"}
+}
+
+func prefixesHelpLine() string {
+	ps := messagePrefixes()
+	if len(ps) == 1 {
+		return ps[0]
+	}
+	return strings.Join(ps, " · ")
 }
 
 func canManageGiveaways(s *discordgo.Session, guildID, channelID, userID string) bool {
@@ -37,7 +46,9 @@ func registerCommands(s *discordgo.Session, guildID string) error {
 	if s.State == nil || s.State.User == nil {
 		return fmt.Errorf("session not ready")
 	}
-	cmd := &discordgo.ApplicationCommand{
+	appID := s.State.User.ID
+
+	giveaway := &discordgo.ApplicationCommand{
 		Name:        "giveaway",
 		Description: "Create and manage giveaways",
 		Options: []*discordgo.ApplicationCommandOption{
@@ -114,7 +125,84 @@ func registerCommands(s *discordgo.Session, guildID string) error {
 			},
 		},
 	}
-	_, err := s.ApplicationCommandCreate(s.State.User.ID, guildID, cmd)
+
+	short := &discordgo.ApplicationCommand{
+		Name:        "g",
+		Description: "Quick giveaways (/g create)",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionSubCommand,
+				Name:        "create",
+				Description: "Post a giveaway in this channel",
+				Options: []*discordgo.ApplicationCommandOption{
+					{
+						Type:        discordgo.ApplicationCommandOptionChannel,
+						Name:        "channel",
+						Description: "Channel (defaults to here if omitted)",
+						Required:    false,
+						ChannelTypes: []discordgo.ChannelType{
+							discordgo.ChannelTypeGuildText,
+							discordgo.ChannelTypeGuildNews,
+						},
+					},
+					{
+						Type:        discordgo.ApplicationCommandOptionString,
+						Name:        "prize",
+						Description: "What you are giving away",
+						Required:    true,
+					},
+					{
+						Type:        discordgo.ApplicationCommandOptionString,
+						Name:        "duration",
+						Description: `How long until it ends (e.g. 1m, 90m, 2h, 1d) or plain minutes like "120"`,
+						Required:    true,
+					},
+					{
+						Type:        discordgo.ApplicationCommandOptionInteger,
+						Name:        "winners",
+						Description: "How many winners (1–25)",
+						Required:    true,
+						MinValue:    floatPtr(1),
+						MaxValue:    25,
+					},
+					{
+						Type:        discordgo.ApplicationCommandOptionRole,
+						Name:        "require_role",
+						Description: "Optional: users must have this role to enter",
+						Required:    false,
+					},
+				},
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionSubCommand,
+				Name:        "end",
+				Description: "End a giveaway early",
+				Options: []*discordgo.ApplicationCommandOption{
+					{
+						Type:        discordgo.ApplicationCommandOptionString,
+						Name:        "id",
+						Description: "Giveaway ID (embed footer)",
+						Required:    true,
+					},
+				},
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionSubCommand,
+				Name:        "reroll",
+				Description: "Reroll winners",
+				Options: []*discordgo.ApplicationCommandOption{
+					{
+						Type:        discordgo.ApplicationCommandOptionString,
+						Name:        "id",
+						Description: "Giveaway ID",
+						Required:    true,
+					},
+				},
+			},
+		},
+	}
+
+	_, err := s.ApplicationCommandBulkOverwrite(appID, guildID, []*discordgo.ApplicationCommand{giveaway, short})
 	return err
 }
 
@@ -134,25 +222,48 @@ func followupOK(s *discordgo.Session, i *discordgo.InteractionCreate, msg string
 	})
 }
 
-func handleGiveawayCommand(s *discordgo.Session, i *discordgo.InteractionCreate, store *giveawayStore) {
+// Discord requires an acknowledgement within ~3 seconds. Always defer immediately;
+// previously we called UserChannelPermissions *before* defer (slow) or ignored `/g`.
+func handleGiveawaySlash(s *discordgo.Session, i *discordgo.InteractionCreate, store *giveawayStore) {
 	if i.Member == nil || i.Member.User == nil {
 		respondEphemeral(s, i, "Use this command in a server.")
 		return
 	}
+
 	data := i.ApplicationCommandData()
-	if data.Name != "giveaway" || len(data.Options) == 0 {
+	root := strings.ToLower(strings.TrimSpace(data.Name))
+	sub := ""
+	if len(data.Options) > 0 {
+		sub = strings.ToLower(strings.TrimSpace(data.Options[0].Name))
+	}
+
+	valid := root == "giveaway" || root == "g"
+	if !valid {
 		return
 	}
-	sub := data.Options[0].Name
+	comboOk := root == "giveaway" && (sub == "start" || sub == "end" || sub == "reroll") ||
+		root == "g" && (sub == "create" || sub == "end" || sub == "reroll")
+	if !comboOk || sub == "" {
+		respondEphemeral(s, i, "Unknown command.")
+		return
+	}
+
+	if err := respondDefer(s, i); err != nil {
+		log.Printf("slash defer failed: %v", err)
+		return
+	}
+
 	opts := subcommandOptions(&data)
 
 	userID := i.Member.User.ID
 	chID := i.ChannelID
+	guildID := i.GuildID
 
-	switch sub {
-	case "start":
-		if !canManageGiveaways(s, i.GuildID, chID, userID) {
-			respondEphemeral(s, i, "You need **Manage Server** (or Administrator) to start giveaways.")
+	switch {
+
+	case root == "giveaway" && sub == "start":
+		if !canManageGiveaways(s, guildID, chID, userID) {
+			followupErr(s, i, "You need **Manage Server** (or Administrator) to start giveaways.")
 			return
 		}
 		channelID := optionChannelID(opts, "channel")
@@ -160,65 +271,86 @@ func handleGiveawayCommand(s *discordgo.Session, i *discordgo.InteractionCreate,
 		winners := optionInt(opts, "winners")
 		prize := strings.TrimSpace(optionString(opts, "prize"))
 		reqRole := optionRoleID(opts, "require_role")
+		dur := time.Duration(minutes) * time.Minute
 		if channelID == "" || minutes < 1 || winners < 1 || prize == "" {
-			respondEphemeral(s, i, "Invalid options.")
+			followupErr(s, i, "Invalid options.")
 			return
 		}
-		if err := respondDefer(s, i); err != nil {
-			return
-		}
-		if err := postGiveaway(s, store, i.GuildID, channelID, userID, minutes, winners, prize, reqRole); err != nil {
+		if err := postGiveaway(s, store, guildID, channelID, userID, dur, winners, prize, reqRole); err != nil {
 			log.Printf("giveaway start: %v", err)
 			followupErr(s, i, "Could not start giveaway: "+err.Error())
 			return
 		}
 		followupOK(s, i, "Giveaway posted.")
 
-	case "end":
-		if !canManageGiveaways(s, i.GuildID, chID, userID) {
-			respondEphemeral(s, i, "You need **Manage Server** (or Administrator).")
+	case root == "g" && sub == "create":
+		if !canManageGiveaways(s, guildID, chID, userID) {
+			followupErr(s, i, "You need **Manage Server** (or Administrator) to start giveaways.")
+			return
+		}
+		channelID := strings.TrimSpace(optionString(opts, "channel"))
+		if channelID == "" {
+			channelID = chID
+		}
+		prize := strings.TrimSpace(optionString(opts, "prize"))
+		durationStr := strings.TrimSpace(optionString(opts, "duration"))
+		winners := optionInt(opts, "winners")
+		reqRole := optionRoleID(opts, "require_role")
+		if winners < 1 || prize == "" || durationStr == "" {
+			followupErr(s, i, "Invalid options.")
+			return
+		}
+		dur, err := parseFlexibleDuration(durationStr)
+		if err != nil {
+			followupErr(s, i, err.Error())
+			return
+		}
+		if err := postGiveaway(s, store, guildID, channelID, userID, dur, winners, prize, reqRole); err != nil {
+			log.Printf("g create: %v", err)
+			followupErr(s, i, "Could not start giveaway: "+err.Error())
+			return
+		}
+		followupOK(s, i, "Giveaway posted.")
+
+	case sub == "end":
+		if !canManageGiveaways(s, guildID, chID, userID) {
+			followupErr(s, i, "You need **Manage Server** (or Administrator).")
 			return
 		}
 		id := strings.TrimSpace(optionString(opts, "id"))
 		g := store.get(id)
-		if g == nil || g.GuildID != i.GuildID {
-			respondEphemeral(s, i, "Unknown giveaway ID for this server.")
+		if g == nil || g.GuildID != guildID {
+			followupErr(s, i, "Unknown giveaway ID for this server.")
 			return
 		}
 		if g.Ended {
-			respondEphemeral(s, i, "That giveaway already ended.")
-			return
-		}
-		if err := respondDefer(s, i); err != nil {
+			followupErr(s, i, "That giveaway already ended.")
 			return
 		}
 		finalizeGiveaway(s, store, id)
 		followupOK(s, i, "Giveaway ended.")
 
-	case "reroll":
-		if !canManageGiveaways(s, i.GuildID, chID, userID) {
-			respondEphemeral(s, i, "You need **Manage Server** (or Administrator).")
+	case sub == "reroll":
+		if !canManageGiveaways(s, guildID, chID, userID) {
+			followupErr(s, i, "You need **Manage Server** (or Administrator).")
 			return
 		}
 		id := strings.TrimSpace(optionString(opts, "id"))
 		g := store.get(id)
-		if g == nil || g.GuildID != i.GuildID {
-			respondEphemeral(s, i, "Unknown giveaway ID for this server.")
+		if g == nil || g.GuildID != guildID {
+			followupErr(s, i, "Unknown giveaway ID for this server.")
 			return
 		}
 		if !g.Ended {
-			respondEphemeral(s, i, "End the giveaway before rerolling.")
+			followupErr(s, i, "End the giveaway before rerolling.")
 			return
 		}
 		if len(g.Entries) == 0 {
-			respondEphemeral(s, i, "No entries to reroll.")
+			followupErr(s, i, "No entries to reroll.")
 			return
 		}
-		if err := respondDefer(s, i); err != nil {
-			return
-		}
-		winners := pickWinners(g.Entries, g.Winners)
-		g.WinnerIDs = winners
+		wlist := pickWinners(g.Entries, g.Winners)
+		g.WinnerIDs = wlist
 		if err := store.put(g); err != nil {
 			followupErr(s, i, "Save failed: "+err.Error())
 			return
@@ -228,10 +360,10 @@ func handleGiveawayCommand(s *discordgo.Session, i *discordgo.InteractionCreate,
 			followupErr(s, i, "Reroll failed: "+err.Error())
 			return
 		}
-		followupOK(s, i, fmt.Sprintf("Rerolled. Winners: %s", formatMentions(winners)))
+		followupOK(s, i, fmt.Sprintf("Rerolled. Winners: %s", formatMentions(wlist)))
 
 	default:
-		respondEphemeral(s, i, "Unknown subcommand.")
+		followupErr(s, i, "Unknown subcommand.")
 	}
 }
 
@@ -255,10 +387,12 @@ func respondDefer(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 func stripCommandPrefix(content, pr string) (rest string, ok bool) {
 	content = strings.TrimSpace(content)
 	pr = strings.TrimSpace(pr)
-	if len(content) < len(pr) {
+	if len(content) < len(pr) || pr == "" {
 		return "", false
 	}
-	if strings.EqualFold(content[:len(pr)], pr) {
+	next, _ := utf8.DecodeRuneInString(content[len(pr):])
+	isBoundary := len(content) == len(pr) || unicode.IsSpace(next)
+	if strings.EqualFold(content[:len(pr)], pr) && isBoundary {
 		return strings.TrimSpace(content[len(pr):]), true
 	}
 	return "", false
@@ -268,13 +402,20 @@ func handlePrefixedCommand(s *discordgo.Session, m *discordgo.MessageCreate, sto
 	if m.Author == nil || m.Author.Bot || m.GuildID == "" {
 		return
 	}
-	pr := prefix()
-	rest, ok := stripCommandPrefix(m.Content, pr)
-	if !ok {
+	var rest string
+	var matched bool
+	for _, cand := range messagePrefixes() {
+		if r, ok := stripCommandPrefix(m.Content, cand); ok {
+			rest, matched = r, true
+			break
+		}
+	}
+	if !matched {
 		return
 	}
+
 	if rest == "" {
-		_, _ = s.ChannelMessageSend(m.ChannelID, helpText(pr))
+		_, _ = s.ChannelMessageSend(m.ChannelID, helpText(prefixesHelpLine()))
 		return
 	}
 
@@ -286,14 +427,15 @@ func handlePrefixedCommand(s *discordgo.Session, m *discordgo.MessageCreate, sto
 
 	switch sub {
 	case "help":
-		_, _ = s.ChannelMessageSend(m.ChannelID, helpText(pr))
+		_, _ = s.ChannelMessageSend(m.ChannelID, helpText(prefixesHelpLine()))
 	case "start":
 		if !canManageGiveaways(s, m.GuildID, m.ChannelID, m.Author.ID) {
 			_, _ = s.ChannelMessageSend(m.ChannelID, "You need **Manage Server** (or Administrator) to start giveaways.")
 			return
 		}
 		if len(fields) < 4 {
-			_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Usage: `%s start <minutes> <winners> <prize…>`", pr))
+			ph := prefixesHelpLine()
+			_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Usage: `%s start <minutes> <winners> <prize…>` · `%s create <prize…> <duration> <winners>`", ph, ph))
 			return
 		}
 		minutes, err1 := strconv.Atoi(fields[1])
@@ -307,8 +449,44 @@ func handlePrefixedCommand(s *discordgo.Session, m *discordgo.MessageCreate, sto
 			return
 		}
 		reqRole := strings.TrimSpace(store.defaultRequire)
-		if err := postGiveaway(s, store, m.GuildID, m.ChannelID, m.Author.ID, minutes, winners, prize, reqRole); err != nil {
+		dur := time.Duration(minutes) * time.Minute
+		if err := postGiveaway(s, store, m.GuildID, m.ChannelID, m.Author.ID, dur, winners, prize, reqRole); err != nil {
 			log.Printf("giveaway start: %v", err)
+			_, _ = s.ChannelMessageSend(m.ChannelID, "Could not start: "+err.Error())
+			return
+		}
+		_, _ = s.ChannelMessageSend(m.ChannelID, "Giveaway posted.")
+	case "create":
+		if !canManageGiveaways(s, m.GuildID, m.ChannelID, m.Author.ID) {
+			_, _ = s.ChannelMessageSend(m.ChannelID, "You need **Manage Server** (or Administrator) to start giveaways.")
+			return
+		}
+		ph := prefixesHelpLine()
+		if len(fields) < 4 {
+			_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Usage: `%s create <prize…> <duration> <winners>` · example: `%s create nitro 1m 1`", ph, ph))
+			return
+		}
+		winStr := fields[len(fields)-1]
+		durationStr := fields[len(fields)-2]
+		winners, errWin := strconv.Atoi(winStr)
+		if errWin != nil || winners < 1 {
+			_, _ = s.ChannelMessageSend(m.ChannelID, "Winner count must be a positive integer.")
+			return
+		}
+		prizeParts := fields[1 : len(fields)-2]
+		prize := strings.TrimSpace(strings.Join(prizeParts, " "))
+		if prize == "" {
+			_, _ = s.ChannelMessageSend(m.ChannelID, "Missing prize.")
+			return
+		}
+		duration, errD := parseFlexibleDuration(durationStr)
+		if errD != nil {
+			_, _ = s.ChannelMessageSend(m.ChannelID, errD.Error())
+			return
+		}
+		reqRole := strings.TrimSpace(store.defaultRequire)
+		if err := postGiveaway(s, store, m.GuildID, m.ChannelID, m.Author.ID, duration, winners, prize, reqRole); err != nil {
+			log.Printf("giveaway create: %v", err)
 			_, _ = s.ChannelMessageSend(m.ChannelID, "Could not start: "+err.Error())
 			return
 		}
@@ -319,7 +497,8 @@ func handlePrefixedCommand(s *discordgo.Session, m *discordgo.MessageCreate, sto
 			return
 		}
 		if len(fields) < 2 {
-			_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Usage: `%s end <giveaway_id>`", pr))
+			ph := prefixesHelpLine()
+			_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Usage: `%s end <giveaway_id>`", ph))
 			return
 		}
 		id := strings.TrimSpace(fields[1])
@@ -340,7 +519,8 @@ func handlePrefixedCommand(s *discordgo.Session, m *discordgo.MessageCreate, sto
 			return
 		}
 		if len(fields) < 2 {
-			_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Usage: `%s reroll <giveaway_id>`", pr))
+			ph := prefixesHelpLine()
+			_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Usage: `%s reroll <giveaway_id>`", ph))
 			return
 		}
 		id := strings.TrimSpace(fields[1])
@@ -369,21 +549,31 @@ func handlePrefixedCommand(s *discordgo.Session, m *discordgo.MessageCreate, sto
 		}
 		_, _ = s.ChannelMessageSend(m.ChannelID, "Rerolled: "+formatMentions(winners))
 	default:
-		_, _ = s.ChannelMessageSend(m.ChannelID, helpText(pr))
+		_, _ = s.ChannelMessageSend(m.ChannelID, helpText(prefixesHelpLine()))
 	}
 }
 
-func helpText(pr string) string {
+func helpText(prefixHints string) string {
 	return fmt.Sprintf(
 		"**Giveaway bot**\n"+
-			"• Slash: `/giveaway start`, `/giveaway end`, `/giveaway reroll`\n"+
-			"• Prefix: `%s start <minutes> <winners> <prize>` · `%s end <id>` · `%s reroll <id>`\n"+
-			"The giveaway ID is in the embed footer.",
-		pr, pr, pr,
+			"• Slash: `/giveaway start` · `/giveaway end` · `/giveaway reroll`\n"+
+			"• Also: **`/g create`** … `/g end`, `/g reroll`\n"+
+			"• Prefix (**%s**): `%s create <prize…> <duration> <winners>` (e.g. `nitro 1m 1`)\n"+
+			"`%s start <minutes> <winners> <prize>` · `%s end <id>` · `%s reroll <id>`\n"+
+			"Giveaway IDs are shown in embed footers.",
+		prefixHints, prefixHints, prefixHints, prefixHints, prefixHints,
 	)
 }
 
-func postGiveaway(s *discordgo.Session, store *giveawayStore, guildID, channelID, hostID string, minutes, winners int, prize, requireRole string) error {
+const maxGiveawayDuration = 7 * 24 * time.Hour
+
+func postGiveaway(s *discordgo.Session, store *giveawayStore, guildID, channelID, hostID string, duration time.Duration, winners int, prize, requireRole string) error {
+	if duration <= 0 {
+		return fmt.Errorf("duration must be positive")
+	}
+	if duration > maxGiveawayDuration {
+		duration = maxGiveawayDuration
+	}
 	id, err := store.newID()
 	if err != nil {
 		return err
@@ -398,7 +588,7 @@ func postGiveaway(s *discordgo.Session, store *giveawayStore, guildID, channelID
 		Prize:       prize,
 		HostID:      hostID,
 		Winners:     winners,
-		EndsAt:      time.Now().Add(time.Duration(minutes) * time.Minute),
+		EndsAt:      time.Now().Add(duration),
 		Entries:     nil,
 		Ended:       false,
 		RequireRole: requireRole,
@@ -520,34 +710,39 @@ func handleJoinButton(s *discordgo.Session, i *discordgo.InteractionCreate, stor
 	if !strings.HasPrefix(data.CustomID, joinPrefix) {
 		return
 	}
+	if err := respondDefer(s, i); err != nil {
+		log.Printf("join button defer: %v", err)
+		return
+	}
+
 	id := strings.TrimPrefix(data.CustomID, joinPrefix)
 	g := store.get(id)
 	if g == nil {
-		respondEphemeral(s, i, "Giveaway not found.")
+		followupErr(s, i, "Giveaway not found.")
 		return
 	}
 	if g.Ended || time.Now().After(g.EndsAt) {
-		respondEphemeral(s, i, "This giveaway has ended.")
+		followupErr(s, i, "This giveaway has ended.")
 		return
 	}
 	userID := i.Member.User.ID
 	req := store.effectiveRequireRole(g)
 	if !memberHasRole(s, g.GuildID, userID, req) {
-		respondEphemeral(s, i, "You don't have the required role to enter.")
+		followupErr(s, i, "You don't have the required role to enter.")
 		return
 	}
 	for _, e := range g.Entries {
 		if e == userID {
-			respondEphemeral(s, i, "You're already entered.")
+			followupOK(s, i, "You're already entered.")
 			return
 		}
 	}
 	g.Entries = append(g.Entries, userID)
 	if err := store.put(g); err != nil {
-		respondEphemeral(s, i, "Could not save entry. Try again.")
+		followupErr(s, i, "Could not save entry. Try again.")
 		return
 	}
-	respondEphemeral(s, i, "You're in! Good luck.")
+	followupOK(s, i, "You're in! Good luck.")
 }
 
 func finalizeGiveaway(s *discordgo.Session, store *giveawayStore, id string) {
