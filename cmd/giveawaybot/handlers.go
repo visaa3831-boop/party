@@ -20,7 +20,145 @@ func messagePrefixes() []string {
 	if p := strings.TrimSpace(os.Getenv("GIVEAWAY_PREFIX")); p != "" {
 		return []string{p}
 	}
-	return []string{"$g", "!gw"}
+	// Order: longest literals first (`$gw` before `$`).
+	return []string{"$gwvc", "$gw", "$"}
+}
+
+func ieq(tok, want string) bool {
+	return strings.EqualFold(strings.TrimSpace(tok), want)
+}
+
+func joinVoiceGateDisableWord(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "none", "off", "-", "0", "disable", "clear":
+		return true
+	default:
+		return false
+	}
+}
+
+func stripLeadingFold(s, lit string) (rest string, ok bool) {
+	if len(s) < len(lit) {
+		return "", false
+	}
+	if !strings.EqualFold(s[:len(lit)], lit) {
+		return "", false
+	}
+	return strings.TrimSpace(s[len(lit):]), true
+}
+
+// squashPieces joins argv chunks so users can type IDs without spaces: "1502 867 ..."
+func squashPieces(parts []string) string {
+	return strings.ReplaceAll(strings.Join(parts, ""), " ", "")
+}
+
+func snowflakeDigits(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return "", false
+		}
+	}
+	if len(s) < 17 {
+		return "", false
+	}
+	return s, true
+}
+
+func parseChannelSnowflakeToken(tok string) (id string, disable bool, ok bool) {
+	tok = strings.TrimSpace(tok)
+	if strings.HasPrefix(tok, "<#") && strings.HasSuffix(tok, ">") && len(tok) > 3 {
+		tok = strings.TrimSpace(tok[3 : len(tok)-1])
+	}
+	tok = strings.ReplaceAll(tok, " ", "")
+	tok = strings.TrimPrefix(tok, "#")
+	if joinVoiceGateDisableWord(tok) {
+		return "", true, true
+	}
+	id, valid := snowflakeDigits(tok)
+	if !valid {
+		return "", false, false
+	}
+	return id, false, true
+}
+
+// parseJoinVoicePrefixed parses "$gw vc ...", "$ gw vc ...", "$gwvc<id>", "$ vc ..." payloads (prefix already stripped).
+func parseJoinVoicePrefixed(rest string) (matched, clear bool, id string, needsUsage bool) {
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return false, false, "", false
+	}
+	fields := strings.Fields(rest)
+
+	if len(fields) >= 3 && ieq(fields[0], "gw") && ieq(fields[1], "vc") {
+		tail := squashPieces(fields[2:])
+		if tail == "" {
+			return true, false, "", true
+		}
+		cid, dis, tokOK := parseChannelSnowflakeToken(tail)
+		if !tokOK {
+			return true, false, "", true
+		}
+		if dis {
+			return true, true, "", false
+		}
+		return true, false, cid, false
+	}
+
+	if len(fields) >= 2 && ieq(fields[0], "vc") {
+		tail := squashPieces(fields[1:])
+		if tail == "" {
+			return true, false, "", true
+		}
+		cid, dis, tokOK := parseChannelSnowflakeToken(tail)
+		if !tokOK {
+			return true, false, "", true
+		}
+		if dis {
+			return true, true, "", false
+		}
+		return true, false, cid, false
+	}
+
+	if len(fields) == 2 && ieq(fields[0], "gwvc") {
+		tail := fields[1]
+		cid, dis, tokOK := parseChannelSnowflakeToken(tail)
+		if !tokOK {
+			return true, false, "", true
+		}
+		if dis {
+			return true, true, "", false
+		}
+		return true, false, cid, false
+	}
+
+	if len(fields) == 1 {
+		f := fields[0]
+		tail, ok := stripLeadingFold(f, "gwvc")
+		if !ok || tail == "" {
+			return false, false, "", false
+		}
+		cid, dis, tokOK := parseChannelSnowflakeToken(tail)
+		if !tokOK {
+			return true, false, "", true
+		}
+		if dis {
+			return true, true, "", false
+		}
+		return true, false, cid, false
+	}
+
+	return false, false, "", false
+}
+
+func optionSlashRestrictRole(opts []*discordgo.ApplicationCommandInteractionDataOption) string {
+	if v := optionRoleID(opts, "role"); v != "" {
+		return v
+	}
+	return optionRoleID(opts, "require_role") // Legacy registered command name
 }
 
 func prefixesHelpLine() string {
@@ -29,6 +167,19 @@ func prefixesHelpLine() string {
 		return ps[0]
 	}
 	return strings.Join(ps, " · ")
+}
+
+func examplePrefix() string {
+	for _, p := range messagePrefixes() {
+		if p == "$" {
+			return "$"
+		}
+	}
+	ps := messagePrefixes()
+	if len(ps) > 0 {
+		return ps[0]
+	}
+	return "$"
 }
 
 func canManageGiveaways(s *discordgo.Session, guildID, channelID, userID string) bool {
@@ -42,6 +193,7 @@ func canManageGiveaways(s *discordgo.Session, guildID, channelID, userID string)
 	return perms&discordgo.PermissionAdministrator != 0 || perms&discordgo.PermissionManageGuild != 0
 }
 
+// guildID empty means global slash commands (all servers); non-empty scopes to one guild (shows up immediately).
 func registerCommands(s *discordgo.Session, guildID string) error {
 	if s.State == nil || s.State.User == nil {
 		return fmt.Errorf("session not ready")
@@ -91,8 +243,8 @@ func registerCommands(s *discordgo.Session, guildID string) error {
 					},
 					{
 						Type:        discordgo.ApplicationCommandOptionRole,
-						Name:        "require_role",
-						Description: "Optional: users must have this role to enter",
+						Name:        "role",
+						Description: "Optional role users must have to enter",
 						Required:    false,
 					},
 				},
@@ -167,8 +319,8 @@ func registerCommands(s *discordgo.Session, guildID string) error {
 					},
 					{
 						Type:        discordgo.ApplicationCommandOptionRole,
-						Name:        "require_role",
-						Description: "Optional: users must have this role to enter",
+						Name:        "role",
+						Description: "Optional role users must have to enter",
 						Required:    false,
 					},
 				},
@@ -222,6 +374,12 @@ func followupOK(s *discordgo.Session, i *discordgo.InteractionCreate, msg string
 	})
 }
 
+func followupPublic(s *discordgo.Session, i *discordgo.InteractionCreate, msg string) {
+	_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+		Content: msg,
+	})
+}
+
 // Discord requires an acknowledgement within ~3 seconds. Always defer immediately;
 // previously we called UserChannelPermissions *before* defer (slow) or ignored `/g`.
 func handleGiveawaySlash(s *discordgo.Session, i *discordgo.InteractionCreate, store *giveawayStore) {
@@ -270,7 +428,7 @@ func handleGiveawaySlash(s *discordgo.Session, i *discordgo.InteractionCreate, s
 		minutes := optionInt(opts, "minutes")
 		winners := optionInt(opts, "winners")
 		prize := strings.TrimSpace(optionString(opts, "prize"))
-		reqRole := optionRoleID(opts, "require_role")
+		reqRole := optionSlashRestrictRole(opts)
 		dur := time.Duration(minutes) * time.Minute
 		if channelID == "" || minutes < 1 || winners < 1 || prize == "" {
 			followupErr(s, i, "Invalid options.")
@@ -295,7 +453,7 @@ func handleGiveawaySlash(s *discordgo.Session, i *discordgo.InteractionCreate, s
 		prize := strings.TrimSpace(optionString(opts, "prize"))
 		durationStr := strings.TrimSpace(optionString(opts, "duration"))
 		winners := optionInt(opts, "winners")
-		reqRole := optionRoleID(opts, "require_role")
+		reqRole := optionSlashRestrictRole(opts)
 		if winners < 1 || prize == "" || durationStr == "" {
 			followupErr(s, i, "Invalid options.")
 			return
@@ -387,7 +545,22 @@ func respondDefer(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 func stripCommandPrefix(content, pr string) (rest string, ok bool) {
 	content = strings.TrimSpace(content)
 	pr = strings.TrimSpace(pr)
-	if len(content) < len(pr) || pr == "" {
+	if pr == "" {
+		return "", false
+	}
+	switch pr {
+	case "$gwvc":
+		return stripLeadingFold(content, "$gwvc")
+	case "$gw":
+		return stripLeadingFold(content, "$gw")
+	case "$":
+		if strings.HasPrefix(content, "$") {
+			return strings.TrimSpace(content[len("$"):]), true
+		}
+		return "", false
+	}
+
+	if len(content) < len(pr) {
 		return "", false
 	}
 	next, _ := utf8.DecodeRuneInString(content[len(pr):])
@@ -414,8 +587,35 @@ func handlePrefixedCommand(s *discordgo.Session, m *discordgo.MessageCreate, sto
 		return
 	}
 
+	if mv, clr, vch, bad := parseJoinVoicePrefixed(rest); mv {
+		ph := prefixesHelpLine()
+		if !canManageGiveaways(s, m.GuildID, m.ChannelID, m.Author.ID) {
+			_, _ = s.ChannelMessageSend(m.ChannelID, "You need **Manage Server** (or Administrator) to change the VC join gate.")
+			return
+		}
+		if bad {
+			_, _ = s.ChannelMessageSend(m.ChannelID,
+				fmt.Sprintf("Usage: `%s gw vc` + VC ping (<#…>) **or** raw channel id · `%s gwvc<id>` · `%s gw vc none` to disable.", ph, ph, ph))
+			return
+		}
+		if clr {
+			if err := store.setJoinedVoiceGate("", true); err != nil {
+				_, _ = s.ChannelMessageSend(m.ChannelID, "Save failed: "+err.Error())
+				return
+			}
+			_, _ = s.ChannelMessageSend(m.ChannelID, "VC join gate disabled — anyone eligible by role can join giveaways.")
+			return
+		}
+		if err := store.setJoinedVoiceGate(vch, false); err != nil {
+			_, _ = s.ChannelMessageSend(m.ChannelID, "Save failed: "+err.Error())
+			return
+		}
+		_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("VC join gate set to <#%s>.", vch))
+		return
+	}
+
 	if rest == "" {
-		_, _ = s.ChannelMessageSend(m.ChannelID, helpText(prefixesHelpLine()))
+		_, _ = s.ChannelMessageSend(m.ChannelID, helpText())
 		return
 	}
 
@@ -427,7 +627,7 @@ func handlePrefixedCommand(s *discordgo.Session, m *discordgo.MessageCreate, sto
 
 	switch sub {
 	case "help":
-		_, _ = s.ChannelMessageSend(m.ChannelID, helpText(prefixesHelpLine()))
+		_, _ = s.ChannelMessageSend(m.ChannelID, helpText())
 	case "start":
 		if !canManageGiveaways(s, m.GuildID, m.ChannelID, m.Author.ID) {
 			_, _ = s.ChannelMessageSend(m.ChannelID, "You need **Manage Server** (or Administrator) to start giveaways.")
@@ -498,7 +698,7 @@ func handlePrefixedCommand(s *discordgo.Session, m *discordgo.MessageCreate, sto
 		}
 		if len(fields) < 2 {
 			ph := prefixesHelpLine()
-			_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Usage: `%s end <giveaway_id>`", ph))
+			_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Usage: `%s end <id>`", ph))
 			return
 		}
 		id := strings.TrimSpace(fields[1])
@@ -520,7 +720,7 @@ func handlePrefixedCommand(s *discordgo.Session, m *discordgo.MessageCreate, sto
 		}
 		if len(fields) < 2 {
 			ph := prefixesHelpLine()
-			_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Usage: `%s reroll <giveaway_id>`", ph))
+			_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Usage: `%s reroll <id>`", ph))
 			return
 		}
 		id := strings.TrimSpace(fields[1])
@@ -549,20 +749,18 @@ func handlePrefixedCommand(s *discordgo.Session, m *discordgo.MessageCreate, sto
 		}
 		_, _ = s.ChannelMessageSend(m.ChannelID, "Rerolled: "+formatMentions(winners))
 	default:
-		_, _ = s.ChannelMessageSend(m.ChannelID, helpText(prefixesHelpLine()))
+		_, _ = s.ChannelMessageSend(m.ChannelID, helpText())
 	}
 }
 
-func helpText(prefixHints string) string {
-	return fmt.Sprintf(
-		"**Giveaway bot**\n"+
-			"• Slash: `/giveaway start` · `/giveaway end` · `/giveaway reroll`\n"+
-			"• Also: **`/g create`** … `/g end`, `/g reroll`\n"+
-			"• Prefix (**%s**): `%s create <prize…> <duration> <winners>` (e.g. `nitro 1m 1`)\n"+
-			"`%s start <minutes> <winners> <prize>` · `%s end <id>` · `%s reroll <id>`\n"+
-			"Giveaway IDs are shown in embed footers.",
-		prefixHints, prefixHints, prefixHints, prefixHints, prefixHints,
-	)
+func helpText() string {
+	px := examplePrefix()
+	return "**Giveaway bot**\n" +
+		"• Slash: `/giveaway start` … optional role filter **`role`**\n" +
+		"• Slash: `/g create` · `/giveaway end|reroll` · `/g end|reroll`\n" +
+		"• Text prefixes (**" + prefixesHelpLine() + "**), e.g. with **`" + px + "`**:\n" +
+		"`" + px + " gw vc` + VC ping `<#…>` **or** raw id · `" + px + " gwvc<id>` (digits can be spaced) · `" + px + " gw vc none` · `" + px + " create …`\n" +
+		"IDs are on embed footers."
 }
 
 const maxGiveawayDuration = 7 * 24 * time.Hour
@@ -620,6 +818,9 @@ func giveawayEmbed(store *giveawayStore, g *Giveaway, ended bool) *discordgo.Mes
 			g.Prize, g.Winners, g.EndsAt.Unix())
 		if req != "" {
 			desc += fmt.Sprintf("\n*Requires role <@&%s>*", req)
+		}
+		if rid := store.joinedVoiceGateChanID(); rid != "" {
+			desc += fmt.Sprintf("\n*You must be in voice <#%s> to enter.*", rid)
 		}
 	}
 
@@ -702,6 +903,19 @@ func memberHasRole(s *discordgo.Session, guildID, userID, roleID string) bool {
 	return false
 }
 
+// Requires the user’s current Gateway voice/stage channel to match requiredChanID (from session state cache).
+func memberInRequiredVoiceChannel(s *discordgo.Session, guildID, userID, requiredChanID string) bool {
+	requiredChanID = strings.TrimSpace(requiredChanID)
+	if requiredChanID == "" {
+		return true
+	}
+	vs, err := s.State.VoiceState(guildID, userID)
+	if err != nil || vs == nil || strings.TrimSpace(vs.ChannelID) == "" {
+		return false
+	}
+	return vs.ChannelID == requiredChanID
+}
+
 func handleJoinButton(s *discordgo.Session, i *discordgo.InteractionCreate, store *giveawayStore) {
 	if i.Member == nil || i.Member.User == nil || i.Message == nil {
 		return
@@ -729,6 +943,13 @@ func handleJoinButton(s *discordgo.Session, i *discordgo.InteractionCreate, stor
 	req := store.effectiveRequireRole(g)
 	if !memberHasRole(s, g.GuildID, userID, req) {
 		followupErr(s, i, "You don't have the required role to enter.")
+		return
+	}
+	if rid := store.joinedVoiceGateChanID(); rid != "" &&
+		!memberInRequiredVoiceChannel(s, g.GuildID, userID, rid) {
+		followupPublic(s, i, fmt.Sprintf(
+			"<@%s> you are not following the required rules. join to create: <#%s>",
+			userID, rid))
 		return
 	}
 	for _, e := range g.Entries {

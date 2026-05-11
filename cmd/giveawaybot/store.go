@@ -32,21 +32,23 @@ type Giveaway struct {
 type giveawayStore struct {
 	mu sync.Mutex
 
-	path           string
-	defaultRequire string // VOICE_ROLE_ID env when no per-giveaway role
+	path               string
+	defaultRequire     string // VOICE_ROLE_ID env when no per-giveaway role
+	requireVoiceChanID string // entrants must be connected to this voice/stage channel when set
 
 	Giveaways map[string]*Giveaway `json:"giveaways"`
 }
 
-func newGiveawayStore(defaultRequireRole string) *giveawayStore {
+func newGiveawayStore(defaultRequireRole, requireVoiceChannelID string) *giveawayStore {
 	p := strings.TrimSpace(os.Getenv("GIVEAWAY_DATA_PATH"))
 	if p == "" {
 		p = defaultStorePath
 	}
 	return &giveawayStore{
-		path:           p,
-		defaultRequire: defaultRequireRole,
-		Giveaways:      make(map[string]*Giveaway),
+		path:               p,
+		defaultRequire:     defaultRequireRole,
+		requireVoiceChanID: requireVoiceChannelID,
+		Giveaways:          make(map[string]*Giveaway),
 	}
 }
 
@@ -73,12 +75,16 @@ func (s *giveawayStore) load() error {
 	}
 	var snap struct {
 		Giveaways map[string]*Giveaway `json:"giveaways"`
+		VoiceJoin string               `json:"voiceJoin,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &snap); err != nil {
 		return err
 	}
 	if snap.Giveaways != nil {
 		s.Giveaways = snap.Giveaways
+	}
+	if vc := snap.VoiceJoin; vc != "" {
+		s.requireVoiceChanID = strings.TrimSpace(vc)
 	}
 	return nil
 }
@@ -87,8 +93,10 @@ func (s *giveawayStore) persistUnlocked() error {
 	_ = os.MkdirAll(filepath.Dir(s.path), 0o755)
 	payload := struct {
 		Giveaways map[string]*Giveaway `json:"giveaways"`
+		VoiceJoin string               `json:"voiceJoin,omitempty"`
 	}{
 		Giveaways: s.Giveaways,
+		VoiceJoin: strings.TrimSpace(s.requireVoiceChanID),
 	}
 	raw, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -138,4 +146,21 @@ func (s *giveawayStore) activeIDs() []string {
 		}
 	}
 	return ids
+}
+
+func (s *giveawayStore) joinedVoiceGateChanID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return strings.TrimSpace(s.requireVoiceChanID)
+}
+
+func (s *giveawayStore) setJoinedVoiceGate(id string, clear bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if clear {
+		s.requireVoiceChanID = ""
+	} else {
+		s.requireVoiceChanID = strings.TrimSpace(id)
+	}
+	return s.persistUnlocked()
 }

@@ -15,6 +15,7 @@ func main() {
 	token := strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN"))
 	guildID := strings.TrimSpace(os.Getenv("DISCORD_GUILD_ID"))
 	vcRoleID := strings.TrimSpace(os.Getenv("VOICE_ROLE_ID"))
+	requireVoiceChan := giveawayRequireVoiceChannelID()
 
 	if guildID == "" {
 		guildID = strings.TrimSpace(os.Getenv("GUILD_ID"))
@@ -35,20 +36,29 @@ func main() {
 			discordgo.IntentsMessageContent |
 			discordgo.IntentsGuildVoiceStates
 
-	store := newGiveawayStore(vcRoleID)
+	store := newGiveawayStore(vcRoleID, requireVoiceChan)
+	if requireVoiceChan != "" {
+		log.Printf("giveaway Join gate: must be in voice channel %s", requireVoiceChan)
+	}
 	if err := store.load(); err != nil {
 		log.Printf("giveaway store load: %v", err)
 	}
 
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		log.Printf("logged in as %s", r.User.String())
-		if guildID != "" {
-			if err := registerCommands(s, guildID); err != nil {
-				log.Printf("register commands: %v", err)
-			}
+
+		registerTo := guildID
+		mode := "global"
+		if registerTo != "" {
+			mode = "guild " + registerTo + " (instant)"
 		} else {
-			log.Println("DISCORD_GUILD_ID unset: slash commands not registered (set it for guild commands)")
+			log.Println("DISCORD_GUILD_ID / GUILD_ID unset: registering slash commands globally (can take up to ~1 hour to appear in Discord; set DISCORD_GUILD_ID for instant guild commands)")
 		}
+		if err := registerCommands(s, registerTo); err != nil {
+			log.Printf("register slash commands (%s): %v", mode, err)
+			return
+		}
+		log.Printf("slash commands registered (%s)", mode)
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -76,6 +86,23 @@ func main() {
 	log.Println("bot running")
 
 	select {}
+}
+
+const defaultGiveawayVoiceChannelID = "1502867397605068810"
+
+// giveawayRequireVoiceChannelID: empty env uses defaultGiveawayVoiceChannelID; set GIVEAWAY_REQUIRE_VOICE_CHANNEL_ID
+// to another ID, or to none|off|0|- to turn the check off.
+func giveawayRequireVoiceChannelID() string {
+	raw := strings.TrimSpace(os.Getenv("GIVEAWAY_REQUIRE_VOICE_CHANNEL_ID"))
+	switch strings.ToLower(raw) {
+	case "none", "off", "-", "0":
+		return ""
+	default:
+		if raw != "" {
+			return raw
+		}
+		return defaultGiveawayVoiceChannelID
+	}
 }
 
 // --- option helpers (slash) ---
