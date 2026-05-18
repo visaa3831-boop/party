@@ -1626,11 +1626,19 @@ func HandleReactionAdd(s *discordgo.Session, r *discordgo.MessageReactionAdd, st
 			return
 		}
 	}
-	if rid := store.joinedVoiceGateChanID(); rid != "" && !memberInRequiredVoiceChannel(s, g.GuildID, userID, rid) {
-		_, _ = s.ChannelMessageSend(r.ChannelID, fmt.Sprintf(
+	rid := store.joinedVoiceGateChanID()
+	inVC := memberInRequiredVoiceChannel(s, g.GuildID, userID, rid)
+	log.Printf("Reaction join: userID=%s, rid=%s, inVC=%v", userID, rid, inVC)
+	if rid != "" && !inVC {
+		_, err := s.ChannelMessageSend(r.ChannelID, fmt.Sprintf(
 			"<@%s> you are not following the requirements. join a vc <#%s>",
 			userID, rid))
-		_ = s.MessageReactionRemove(r.ChannelID, r.MessageID, r.Emoji.Name, userID)
+		if err != nil {
+			log.Printf("Failed to send VC requirement message: %v", err)
+		}
+		if err := s.MessageReactionRemove(r.ChannelID, r.MessageID, r.Emoji.Name, userID); err != nil {
+			log.Printf("Failed to remove reaction: %v", err)
+		}
 		return
 	}
 	// Add entry
