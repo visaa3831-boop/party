@@ -1422,11 +1422,19 @@ func postGiveaway(s *discordgo.Session, store *giveawayStore, guildID, channelID
 		Ended:       false,
 		RequireRole: requireRole,
 	}
-	msg, err := s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-		Embed: giveawayEmbed(store, g, false),
-	})
-	if err != nil {
-		return err
+	var msg *discordgo.Message
+	var sendErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		msg, sendErr = s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Embed: giveawayEmbed(store, g, false),
+		})
+		if sendErr == nil {
+			break
+		}
+		if !isRetryableDiscordError(sendErr) || attempt == 3 {
+			return sendErr
+		}
+		time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
 	}
 	g.MessageID = msg.ID
 	if err := store.put(g); err != nil {
@@ -1437,6 +1445,18 @@ func postGiveaway(s *discordgo.Session, store *giveawayStore, guildID, channelID
 		log.Printf("Failed to add 🎉 reaction to giveaway %s: %v", g.ID, err)
 	}
 	return nil
+}
+
+func isRetryableDiscordError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "503") ||
+		strings.Contains(msg, "502") ||
+		strings.Contains(msg, "connection termination") ||
+		strings.Contains(msg, "temporary") ||
+		strings.Contains(msg, "timeout")
 }
 
 func giveawayEmbed(store *giveawayStore, g *Giveaway, ended bool) *discordgo.MessageEmbed {
