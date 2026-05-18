@@ -23,7 +23,7 @@ var (
 	debounceMu  sync.Mutex
 )
 
-// debounceUpdate delays embed update by 500ms to batch multiple rapid changes
+// debounceUpdate delays embed update by 100ms to batch multiple rapid changes
 func debounceUpdate(s *discordgo.Session, store *giveawayStore, g *Giveaway) {
 	debounceMu.Lock()
 	defer debounceMu.Unlock()
@@ -34,7 +34,7 @@ func debounceUpdate(s *discordgo.Session, store *giveawayStore, g *Giveaway) {
 	}
 
 	// Set new timer
-	debounceMap[g.ID] = time.AfterFunc(500*time.Millisecond, func() {
+	debounceMap[g.ID] = time.AfterFunc(100*time.Millisecond, func() {
 		debounceMu.Lock()
 		delete(debounceMap, g.ID)
 		debounceMu.Unlock()

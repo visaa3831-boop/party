@@ -138,7 +138,7 @@ func main() {
 	// Startup scan for VC role assignment
 	if vcJoinRoleID != "" {
 		go func() {
-			time.Sleep(2 * time.Second) // Wait for guilds to be ready
+			time.Sleep(500 * time.Millisecond) // Wait for guilds to be ready
 			if guildID == "" {
 				log.Println("No guild ID set, skipping VC role startup scan")
 				return
