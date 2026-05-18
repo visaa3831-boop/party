@@ -1627,6 +1627,9 @@ func HandleReactionAdd(s *discordgo.Session, r *discordgo.MessageReactionAdd, st
 		}
 	}
 	if rid := store.joinedVoiceGateChanID(); rid != "" && !memberInRequiredVoiceChannel(s, g.GuildID, userID, rid) {
+		_, _ = s.ChannelMessageSend(r.ChannelID, fmt.Sprintf(
+			"<@%s> you are not following the requirements. join a vc <#%s>",
+			userID, rid))
 		return
 	}
 	// Add entry
