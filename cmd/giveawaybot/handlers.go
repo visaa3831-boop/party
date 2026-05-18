@@ -580,7 +580,11 @@ func handleMassDM(s *discordgo.Session, m *discordgo.MessageCreate, args []strin
 	}
 	message := strings.TrimSpace(strings.Join(msgParts, " "))
 	if message == "" {
-		_, _ = s.ChannelMessageSend(m.ChannelID, "Message cannot be empty.")
+		_, _ = s.ChannelMessageSendEmbed(m.ChannelID, &discordgo.MessageEmbed{
+			Title:       "❌ Error",
+			Description: "Message cannot be empty.",
+			Color:       0xFF0000,
+		})
 		return
 	}
 
@@ -588,7 +592,11 @@ func handleMassDM(s *discordgo.Session, m *discordgo.MessageCreate, args []strin
 	if filterRoleID != "" {
 		targetDesc = fmt.Sprintf("members with <@&%s>", filterRoleID)
 	}
-	_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("📨 Starting mass DM to %s…", targetDesc))
+	_, _ = s.ChannelMessageSendEmbed(m.ChannelID, &discordgo.MessageEmbed{
+		Title:       "📨 Mass DM Started",
+		Description: fmt.Sprintf("Sending to %s…", targetDesc),
+		Color:       0x5865F2,
+	})
 
 	var members []*discordgo.Member
 	var after string
@@ -596,7 +604,11 @@ func handleMassDM(s *discordgo.Session, m *discordgo.MessageCreate, args []strin
 		page, err := s.GuildMembers(m.GuildID, after, 1000)
 		if err != nil {
 			log.Printf("massDM: GuildMembers: %v", err)
-			_, _ = s.ChannelMessageSend(m.ChannelID, "Failed to fetch member list: "+err.Error())
+			_, _ = s.ChannelMessageSendEmbed(m.ChannelID, &discordgo.MessageEmbed{
+				Title:       "❌ Error",
+				Description: "Failed to fetch member list: " + err.Error(),
+				Color:       0xFF0000,
+			})
 			return
 		}
 		members = append(members, page...)
@@ -631,7 +643,7 @@ func handleMassDM(s *discordgo.Session, m *discordgo.MessageCreate, args []strin
 		ch, err := s.UserChannelCreate(mem.User.ID)
 		if err != nil {
 			failed++
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		if _, err := s.ChannelMessageSend(ch.ID, message); err != nil {
@@ -639,11 +651,14 @@ func handleMassDM(s *discordgo.Session, m *discordgo.MessageCreate, args []strin
 		} else {
 			sent++
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 
-	_, _ = s.ChannelMessageSend(m.ChannelID, fmt.Sprintf(
-		"✅ Mass DM complete — **%d sent**, **%d failed** (closed DMs / bots).", sent, failed))
+	_, _ = s.ChannelMessageSendEmbed(m.ChannelID, &discordgo.MessageEmbed{
+		Title:       "✅ Mass DM Complete",
+		Description: fmt.Sprintf("**%d sent**, **%d failed** (closed DMs / bots)", sent, failed),
+		Color:       0x57F287,
+	})
 }
 
 // guildID empty means global slash commands (all servers); non-empty scopes to one guild (shows up immediately).
