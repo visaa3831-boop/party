@@ -1629,6 +1629,9 @@ func HandleReactionAdd(s *discordgo.Session, r *discordgo.MessageReactionAdd, st
 	if r.Emoji.Name != "🎉" {
 		return
 	}
+	if s.State != nil && s.State.User != nil && r.UserID == s.State.User.ID {
+		return
+	}
 	g := store.getByMessageID(r.MessageID)
 	if g == nil || g.Ended {
 		return
