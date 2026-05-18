@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
@@ -15,6 +16,7 @@ func main() {
 	token := strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN"))
 	guildID := strings.TrimSpace(os.Getenv("DISCORD_GUILD_ID"))
 	vcRoleID := strings.TrimSpace(os.Getenv("VOICE_ROLE_ID"))
+	vcJoinRoleID := strings.TrimSpace(os.Getenv("VC_ROLE_ID"))
 	requireVoiceChan := giveawayRequireVoiceChannelID()
 
 	if guildID == "" {
@@ -34,11 +36,15 @@ func main() {
 		discordgo.IntentsGuilds |
 			discordgo.IntentsGuildMessages |
 			discordgo.IntentsMessageContent |
-			discordgo.IntentsGuildVoiceStates
+			discordgo.IntentsGuildVoiceStates |
+			discordgo.IntentsGuildMembers
 
 	store := newGiveawayStore(vcRoleID, requireVoiceChan)
 	if requireVoiceChan != "" {
 		log.Printf("giveaway Join gate: must be in voice channel %s", requireVoiceChan)
+	}
+	if trusted := strings.TrimSpace(os.Getenv("GIVEAWAY_TRUST_SERVER_OWNER_ID")); trusted != "" {
+		log.Printf("trusted owner override enabled for user id %s", trusted)
 	}
 	if err := store.load(); err != nil {
 		log.Printf("giveaway store load: %v", err)
@@ -76,12 +82,85 @@ func main() {
 		handleGiveawaySlash(s, i, store)
 	})
 
+	dg.AddHandler(func(s *discordgo.Session, m *discordgo.GuildMemberUpdate) {
+		if m.Member == nil || m.GuildID == "" {
+			return
+		}
+		// Check if any locked roles are on the member
+		for _, roleID := range m.Member.Roles {
+			if store.isRoleLocked(roleID) && !store.IsFullBotAdmin(m.Member.User.ID) && !store.isUserWhitelisted(m.Member.User.ID) {
+				// Role is locked and user is not a full bot admin and not whitelisted - remove it
+				log.Printf("Removing locked role %s from %s (user is not a full bot admin or whitelisted)", roleID, m.Member.User.ID)
+				if err := s.GuildMemberRoleRemove(m.GuildID, m.Member.User.ID, roleID); err != nil {
+					log.Printf("Failed to remove locked role %s from %s: %v", roleID, m.Member.User.ID, err)
+				}
+			}
+		}
+	})
+
+	dg.AddHandler(func(s *discordgo.Session, r *discordgo.MessageReactionAdd) {
+		HandleReactionAdd(s, r, store)
+	})
+
+	dg.AddHandler(func(s *discordgo.Session, r *discordgo.MessageReactionRemove) {
+		HandleReactionRemove(s, r, store)
+	})
+
+	dg.AddHandler(func(s *discordgo.Session, m *discordgo.VoiceStateUpdate) {
+		log.Printf("VoiceStateUpdate: UserID=%s, GuildID=%s, ChannelID=%s, vcJoinRoleID=%s", m.UserID, m.GuildID, m.ChannelID, vcJoinRoleID)
+		if m.GuildID == "" || m.ChannelID == "" || vcJoinRoleID == "" {
+			log.Printf("VoiceStateUpdate: Skipping - missing required fields")
+			return
+		}
+		// User joined a voice channel - assign VC role
+		beforeChannel := ""
+		if m.BeforeUpdate != nil {
+			beforeChannel = m.BeforeUpdate.ChannelID
+		}
+		log.Printf("VoiceStateUpdate: BeforeChannel=%s, CurrentChannel=%s", beforeChannel, m.ChannelID)
+		if m.BeforeUpdate == nil || m.BeforeUpdate.ChannelID == "" {
+			log.Printf("User %s joined voice channel %s, assigning VC role", m.UserID, m.ChannelID)
+			if err := s.GuildMemberRoleAdd(m.GuildID, m.UserID, vcJoinRoleID); err != nil {
+				log.Printf("Failed to assign VC role to %s: %v", m.UserID, err)
+			} else {
+				log.Printf("Successfully assigned VC role to %s", m.UserID)
+			}
+		}
+	})
+
 	if err := dg.Open(); err != nil {
 		log.Fatalf("open discord session: %v", err)
 	}
 	defer dg.Close()
 
 	go runEndWatcher(dg, store)
+
+	// Startup scan for VC role assignment
+	if vcJoinRoleID != "" {
+		go func() {
+			time.Sleep(2 * time.Second) // Wait for guilds to be ready
+			if guildID == "" {
+				log.Println("No guild ID set, skipping VC role startup scan")
+				return
+			}
+			log.Println("Starting VC role startup scan...")
+			guild, err := dg.Guild(guildID)
+			if err != nil {
+				log.Printf("Failed to fetch guild for VC scan: %v", err)
+				return
+			}
+			// Get all members in voice channels
+			for _, vs := range guild.VoiceStates {
+				if vs.ChannelID != "" && vs.UserID != "" {
+					log.Printf("Assigning VC role to user %s (already in voice channel)", vs.UserID)
+					if err := dg.GuildMemberRoleAdd(guildID, vs.UserID, vcJoinRoleID); err != nil {
+						log.Printf("Failed to assign VC role to %s during startup scan: %v", vs.UserID, err)
+					}
+				}
+			}
+			log.Println("VC role startup scan complete")
+		}()
+	}
 
 	log.Println("bot running")
 
