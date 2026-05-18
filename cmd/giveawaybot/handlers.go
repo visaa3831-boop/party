@@ -1477,7 +1477,7 @@ func giveawayEmbed(store *giveawayStore, g *Giveaway, ended bool) *discordgo.Mes
 			desc += fmt.Sprintf("\n*Requires role <@&%s>*", req)
 		}
 		if rid := store.joinedVoiceGateChanID(); rid != "" {
-			desc += fmt.Sprintf("\n*You must be in voice <#%s> to enter.*", rid)
+			desc += "\n*You must be in any voice channel to enter.*"
 		}
 	}
 
@@ -1606,8 +1606,8 @@ func handleJoinButton(s *discordgo.Session, i *discordgo.InteractionCreate, stor
 	if rid := store.joinedVoiceGateChanID(); rid != "" &&
 		!memberInRequiredVoiceChannel(s, g.GuildID, userID, rid) {
 		followupPublic(s, i, fmt.Sprintf(
-			"<@%s> you are not following the requirements. join a vc <#%s>",
-			userID, rid))
+			"<@%s> you are not following the requirements. join any voice channel.",
+			userID))
 		return
 	}
 	for _, e := range g.Entries {
@@ -1651,8 +1651,8 @@ func HandleReactionAdd(s *discordgo.Session, r *discordgo.MessageReactionAdd, st
 	log.Printf("Reaction join: userID=%s, rid=%s, inVC=%v", userID, rid, inVC)
 	if rid != "" && !inVC {
 		_, err := s.ChannelMessageSend(r.ChannelID, fmt.Sprintf(
-			"<@%s> you are not following the requirements. join a vc <#%s>",
-			userID, rid))
+			"<@%s> you are not following the requirements. join any voice channel.",
+			userID))
 		if err != nil {
 			log.Printf("Failed to send VC requirement message: %v", err)
 		}
