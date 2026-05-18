@@ -1630,6 +1630,7 @@ func HandleReactionAdd(s *discordgo.Session, r *discordgo.MessageReactionAdd, st
 		_, _ = s.ChannelMessageSend(r.ChannelID, fmt.Sprintf(
 			"<@%s> you are not following the requirements. join a vc <#%s>",
 			userID, rid))
+		_ = s.MessageReactionRemove(r.ChannelID, r.MessageID, r.Emoji.Name, userID)
 		return
 	}
 	// Add entry
