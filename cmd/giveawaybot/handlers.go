@@ -1540,7 +1540,7 @@ func memberHasRole(s *discordgo.Session, guildID, userID, roleID string) bool {
 	return false
 }
 
-// Requires the user's current Gateway voice/stage channel to be in ANY voice channel when requiredChanID is set.
+// Requires the user's current Gateway voice/stage channel to be in the specific required channel.
 func memberInRequiredVoiceChannel(s *discordgo.Session, guildID, userID, requiredChanID string) bool {
 	requiredChanID = strings.TrimSpace(requiredChanID)
 	if requiredChanID == "" {
@@ -1550,8 +1550,7 @@ func memberInRequiredVoiceChannel(s *discordgo.Session, guildID, userID, require
 	if err != nil {
 		return false
 	}
-	// Accept any voice channel when requirement is set
-	return vs.ChannelID != ""
+	return vs.ChannelID == requiredChanID
 }
 
 func handleJoinButton(s *discordgo.Session, i *discordgo.InteractionCreate, store *giveawayStore) {
